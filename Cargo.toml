@@ -1,0 +1,12 @@
+[profile.release]
+panic = 'unwind'
+
+[workspace]
+members = [
+    'node',
+    'pallets/*',
+    'runtime',
+]
+# For Apple M1 build
+[replace]
+"rocksdb:0.15.0" = { path = '/opt/rust-rocksdb/' }
