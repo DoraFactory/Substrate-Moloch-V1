@@ -307,6 +307,28 @@ impl pallet_quadratic_funding::Config for Runtime {
 	type AdminOrigin = EnsureRoot<AccountId>;
 }
 
+parameter_types! {
+	// Use moduleid to generate internal accountid
+	pub const MolochV1ModuleId: ModuleId = ModuleId(*b"py/moloc");
+}
+
+/// Configure the template pallet in pallets/template.
+impl pallet_moloch_v1::Config for Runtime {
+	type ModuleId = MolochV1ModuleId;
+    // The Balances pallet implements the ReservableCurrency trait.
+    // https://substrate.dev/rustdocs/v2.0.0/pallet_balances/index.html#implementations-2
+    type Currency = pallet_balances::Module<Runtime>;
+
+    // No action is taken when deposits are forfeited.
+    type Slashed = ();
+
+    // The ubiquitous event type.
+    type Event = Event;
+
+	// Origin who can control the round
+	type AdminOrigin = EnsureRoot<AccountId>;
+}
+
 // Create the runtime by composing the FRAME pallets that were previously configured.
 construct_runtime!(
 	pub enum Runtime where
@@ -324,6 +346,7 @@ construct_runtime!(
 		Sudo: pallet_sudo::{Module, Call, Config<T>, Storage, Event<T>},
 		// Include the custom logic from the template pallet in the runtime.
 		QuadraticFunding: pallet_quadratic_funding::{Module, Call, Storage, Event<T>},
+		MolochV1: pallet_moloch_v1::{Module, Call, Storage, Event<T>},
 	}
 );
 

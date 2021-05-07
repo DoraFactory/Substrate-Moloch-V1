@@ -27,6 +27,8 @@ serde = { features = ['derive'], optional = true, version = '1.0.119' }
 # local dependencies
 pallet-quadratic-funding = { path = '../pallets/quadratic-funding', default-features = false, version = '2.0.1' }
 pallet-quadratic-funding-runtime-api = { path = "../pallets/quadratic-funding/runtime-api", default-features = false, version = '2.0.1' }
+pallet-moloch-v1 = { path = '../pallets/moloch-v1', default-features = false, version = '2.0.1' }
+
 
 # Substrate dependencies
 frame-benchmarking = { default-features = false, optional = true, version = '2.0.1' }
