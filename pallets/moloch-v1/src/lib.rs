@@ -12,6 +12,7 @@ use sp_runtime::{ModuleId, traits::{ Hash, AccountIdConversion}};
 use frame_support::codec::{Encode, Decode};
 use frame_system::{ensure_signed};
 use sp_std::{vec, vec::Vec, convert::{TryInto}};
+use pallet_timestamp;
 
 #[cfg(test)]
 mod mock;
@@ -28,7 +29,7 @@ pub enum Vote{
 }
 
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
-pub struct Member<AccountId, Hash> {
+pub struct Member<AccountId> {
 	// the # of shares assigned to this member
 	pub shares: u128,
 	// highest proposal index # on which the member voted YES
@@ -36,9 +37,7 @@ pub struct Member<AccountId, Hash> {
 	// always true once a member has been created
 	pub exists: bool,
 	// the key responsible for submitting proposals and voting - defaults to member address unless updated
-	pub delegate_key: Hash,
-	// memeber account
-	pub account: AccountId,
+	pub delegate_key: AccountId,
 }
 
 #[derive(Encode, Decode, Default, Clone, PartialEq)]
@@ -70,10 +69,11 @@ pub struct Proposal<AccountId> {
 	// mapping (address => Vote) votesByMember; // the votes on this proposal by each member
 }
 
-type MemberOf<T> = Member<<T as frame_system::Trait>::AccountId, <T as frame_system::Trait>::Hash>;
+type MemberOf<T> = Member<<T as frame_system::Trait>::AccountId>;
+type ProposalOf<T> = Proposal<<T as frame_system::Trait>::AccountId>;
 type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
 type NegativeImbalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::NegativeImbalance;
-use pallet_timestamp;
+
 /// Configure the pallet by specifying the parameters and types on which it depends.
 pub trait Config: pallet_timestamp::Trait + frame_system::Trait {
 	// used to generate sovereign account
@@ -116,16 +116,18 @@ decl_storage! {
 		// Learn more about declaring storage items:
 		// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
 		// Map, each round start with an id => bool 
-		TotalShares: u32;
-		TotalSharesRequested: u32;
+		TotalShares: u128;
+		TotalSharesRequested: u128;
 		PeriodDuration: u32;
-        VotingPeriodLength: u32;
-        GracePeriodLength: u32;
-        AbortWindow: u32;
-        ProposalDeposit: u32;
-        DilutionBound: u32;
-        ProcessingReward: u32;
+        VotingPeriodLength: u128;
+        GracePeriodLength: u128;
+        AbortWindow: u128;
+        ProposalDeposit: BalanceOf<T>;
+        DilutionBound: u128;
+        ProcessingReward: BalanceOf<T>;
 		SummonTime get(fn summon_time): T::Moment;
+		Members get(fn members): map hasher(blake2_128_concat) T::AccountId  => MemberOf<T>;
+		ProposalQueue get(fn proposal_queue): Vec<ProposalOf<T>>
 	}
 	add_extra_genesis {
 		build(|_config| {
@@ -167,6 +169,14 @@ decl_error! {
 		NoneValue,
 		/// Errors should have helpful documentation associated with them.
 		StorageOverflow,
+		VotingPeriodLengthTooBig,
+		DilutionBoundTooBig,
+		GracePeriodLengthTooBig,
+		AbortWindowTooBig,
+		NoEnoughProposalDeposit,
+		NoEnoughShares,
+		NotMember,
+		SharesOverFlow,
 	}
 }
 
@@ -187,18 +197,48 @@ decl_module! {
 		
 		/// Summon a group or orgnization
 		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn summon(origin) -> dispatch::DispatchResult {
+		pub fn summon(origin, period_duration: u32, voting_period_length: u128,
+			          grace_period_length: u128, abort_window: u128, dilution_bound: u128,
+					  #[compact] proposal_deposit: BalanceOf<T>, 
+					  #[compact]  processing_reward: BalanceOf<T>) -> dispatch::DispatchResult {
 			let who = ensure_signed(origin)?;
-			let now = pallet_timestamp::Module::<T>::now();
-			SummonTime::<T>::put(now);
-			debug::info!("======>>>>>>>>Request sent by: {:?}", now);
+			ensure!(voting_period_length <= T::MaxVotingPeriodLength::get(), Error::<T>::VotingPeriodLengthTooBig);
+			ensure!(grace_period_length <= T::MaxGracePeriodLength::get(), Error::<T>::GracePeriodLengthTooBig);
+			ensure!(dilution_bound <= T::MaxDilutionBound::get(), Error::<T>::DilutionBoundTooBig);
+			ensure!(abort_window <= voting_period_length, Error::<T>::AbortWindowTooBig);
+			ensure!(proposal_deposit >= processing_reward, Error::<T>::NoEnoughProposalDeposit);
+
+			SummonTime::<T>::put(pallet_timestamp::Module::<T>::now());
+			PeriodDuration::put(period_duration);
+			VotingPeriodLength::put(voting_period_length);
+			GracePeriodLength::put(grace_period_length);
+			AbortWindow::put(abort_window);
+			DilutionBound::put(dilution_bound);
+
+			ProposalDeposit::<T>::put(proposal_deposit);
+			ProcessingReward::<T>::put(processing_reward);
+			let member = Member {
+				shares: 1,
+				highest_index_yes_vote: 0,
+				exists: true,
+				delegate_key: who.clone(),
+			};
+			Members::<T>::insert(who.clone(), member);
+			TotalShares::put(1);
+			Self::deposit_event(RawEvent::SummonComplete(who, 1));
 			Ok(())
 		}
 
 		/// One of the members submit a proposal
 		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn submit_proposal(origin) -> dispatch::DispatchResult {
+		pub fn submit_proposal(origin, applicant: T::AccountId, #[compact] token_tribute: BalanceOf<T>,
+			                   shares_requested: u128, details: Vec<u8>) -> dispatch::DispatchResult {
 			let who = ensure_signed(origin)?;
+			ensure!(Members::<T>::contains_key(who.clone()), Error::<T>::NotMember);
+			ensure!(Members::<T>::get(who.clone()).shares > 0, Error::<T>::NoEnoughShares);
+			let total_requested = TotalSharesRequested::get().checked_add(shares_requested).unwrap();
+			let future_shares = TotalShares::get().checked_add(total_requested).unwrap();
+			ensure!(future_shares <= T::MaxShares::get(), Error::<T>::SharesOverFlow);
 			Ok(())
 		}
 
