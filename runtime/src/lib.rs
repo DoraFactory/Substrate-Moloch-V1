@@ -310,6 +310,14 @@ impl pallet_quadratic_funding::Config for Runtime {
 parameter_types! {
 	// Use moduleid to generate internal accountid
 	pub const MolochV1ModuleId: ModuleId = ModuleId(*b"py/moloc");
+	// HARD-CODED LIMITS
+    // These numbers are quite arbitrary; they are small enough to avoid overflows when doing calculations
+    // with periods or shares, yet big enough to not limit reasonable use cases.
+    pub const MaxVotingPeriodLength: u128 = 10_u128.pow(18); // maximum length of voting period
+    pub const MaxGracePeriodLength: u128 = 10_u128.pow(18); // maximum length of grace period
+    pub const MaxDilutionBound: u128 = 10_u128.pow(18); // maximum dilution bound
+    pub const MaxShares: u128 = 10_u128.pow(18); // maximum number of shares that can be minted
+
 }
 
 /// Configure the template pallet in pallets/template.
@@ -327,6 +335,19 @@ impl pallet_moloch_v1::Config for Runtime {
 
 	// Origin who can control the round
 	type AdminOrigin = EnsureRoot<AccountId>;
+
+	// maximum length of voting period
+	type MaxVotingPeriodLength = MaxVotingPeriodLength;
+
+	// maximum length of grace period
+	type MaxGracePeriodLength = MaxGracePeriodLength;
+
+	// maximum dilution bound
+	type MaxDilutionBound = MaxDilutionBound;
+
+	// maximum number of shares
+	type MaxShares = MaxShares;
+
 }
 
 // Create the runtime by composing the FRAME pallets that were previously configured.

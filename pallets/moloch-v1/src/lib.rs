@@ -4,7 +4,6 @@
 /// Learn more about FRAME and the core library of Substrate FRAME pallets:
 /// https://substrate.dev/docs/en/knowledgebase/runtime/frame
 /// debug guide https://substrate.dev/recipes/runtime-printing.html
-
 use frame_support::{
 	decl_module, decl_storage, decl_event, decl_error, dispatch, debug, ensure,
 	traits::{Currency, EnsureOrigin, ReservableCurrency, OnUnbalanced, Get, ExistenceRequirement::{KeepAlive}},
@@ -74,9 +73,9 @@ pub struct Proposal<AccountId> {
 type MemberOf<T> = Member<<T as frame_system::Trait>::AccountId, <T as frame_system::Trait>::Hash>;
 type BalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance;
 type NegativeImbalanceOf<T> = <<T as Config>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::NegativeImbalance;
-
+use pallet_timestamp;
 /// Configure the pallet by specifying the parameters and types on which it depends.
-pub trait Config: frame_system::Trait {
+pub trait Config: pallet_timestamp::Trait + frame_system::Trait {
 	// used to generate sovereign account
 	// refer: https://github.com/paritytech/substrate/blob/743accbe3256de2fc615adcaa3ab03ebdbbb4dbd/frame/treasury/src/lib.rs#L92
 	type ModuleId: Get<ModuleId>;
@@ -93,6 +92,18 @@ pub trait Config: frame_system::Trait {
 	/// What to do with slashed funds.
 	type Slashed: OnUnbalanced<NegativeImbalanceOf<Self>>;
 
+	// maximum length of voting period
+	type MaxVotingPeriodLength: Get<u128>;
+
+	// maximum length of grace period
+	type MaxGracePeriodLength: Get<u128>;
+
+	// maximum dilution bound
+	type MaxDilutionBound: Get<u128>;
+
+	// maximum number of shares
+	type MaxShares: Get<u128>;
+
 	
 }
 
@@ -105,7 +116,25 @@ decl_storage! {
 		// Learn more about declaring storage items:
 		// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
 		// Map, each round start with an id => bool 
-		
+		TotalShares: u32;
+		TotalSharesRequested: u32;
+		PeriodDuration: u32;
+        VotingPeriodLength: u32;
+        GracePeriodLength: u32;
+        AbortWindow: u32;
+        ProposalDeposit: u32;
+        DilutionBound: u32;
+        ProcessingReward: u32;
+		SummonTime get(fn summon_time): T::Moment;
+	}
+	add_extra_genesis {
+		build(|_config| {
+			// Create pallet's internal account
+			let _ = T::Currency::make_free_balance_be(
+				&<Module<T>>::account_id(),
+				T::Currency::minimum_balance(),
+			);
+		});
 	}
 }
 
@@ -151,11 +180,18 @@ decl_module! {
 
 		// Events must be initialized if they are used by the pallet.
 		fn deposit_event() = default;
+		const MaxVotingPeriodLength: u128 = T::MaxVotingPeriodLength::get();
+		const MaxGracePeriodLength: u128 = T::MaxGracePeriodLength::get();
+		const MaxDilutionBound: u128 = T::MaxDilutionBound::get();
+		const MaxShares: u128 = T::MaxShares::get();
 		
 		/// Summon a group or orgnization
 		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
 		pub fn summon(origin) -> dispatch::DispatchResult {
 			let who = ensure_signed(origin)?;
+			let now = pallet_timestamp::Module::<T>::now();
+			SummonTime::<T>::put(now);
+			debug::info!("======>>>>>>>>Request sent by: {:?}", now);
 			Ok(())
 		}
 
