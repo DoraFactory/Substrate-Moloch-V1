@@ -8,10 +8,10 @@ use frame_support::{
 	decl_module, decl_storage, decl_event, decl_error, dispatch, debug, ensure,
 	traits::{Currency, EnsureOrigin, ReservableCurrency, OnUnbalanced, Get, ExistenceRequirement::{KeepAlive}},
 };
-use sp_runtime::{ModuleId, traits::{ Hash, AccountIdConversion}};
+use sp_runtime::{ModuleId, traits::{ AccountIdConversion }};
 use frame_support::codec::{Encode, Decode};
 use frame_system::{ensure_signed};
-use sp_std::{vec, vec::Vec, convert::{TryInto}};
+use sp_std::{vec::Vec, convert::{TryInto}};
 use pallet_timestamp;
 
 #[cfg(test)]
@@ -178,6 +178,7 @@ decl_error! {
 		NoEnoughProposalDeposit,
 		NoEnoughShares,
 		NotMember,
+		NotProposalApplicant,
 		SharesOverFlow,
 		ProposalNotExist,
 		ProposalNotStart,
@@ -188,6 +189,9 @@ decl_error! {
 		ProposalExpired,
 		InvalidVote,
 		MemberHasVoted,
+		AbortWindowNotPassed,
+		NoOverwriteDelegate,
+		NoOverwriteMember,
 	}
 }
 
@@ -363,13 +367,13 @@ decl_module! {
 						mem.shares = mem.shares.checked_add(proposal.shares_requested).unwrap();
 					});
 				} else {
-					// if the applicant is already a member, add to their existing shares
+					// if the applicant address is already taken by a member's delegateKey, reset it to their member address
 					if AddressOfDelegates::<T>::contains_key(proposal.applicant.clone()) {
 						let delegate = AddressOfDelegates::<T>::get(proposal.applicant.clone());
-						Members::<T>::mutate(proposal.applicant.clone(), |mem| {
-							mem.delegate_key = proposal.applicant.clone();
+						Members::<T>::mutate(delegate.clone(), |mem| {
+							mem.delegate_key = delegate.clone();
 						});
-						AddressOfDelegates::<T>::insert(proposal.applicant.clone(), proposal.applicant.clone());
+						AddressOfDelegates::<T>::insert(delegate.clone(), delegate.clone());
 					}
 					// add new member
 					let member = Member {
@@ -440,8 +444,45 @@ decl_module! {
 
 		/// Member rage quit
 		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
-		pub fn abort(origin) -> dispatch::DispatchResult {
+		pub fn abort(origin, proposal_index: u128) -> dispatch::DispatchResult {
 			let who = ensure_signed(origin)?;
+			ensure!(proposal_index < ProposalQueue::<T>::get().len().try_into().unwrap(), Error::<T>::ProposalNotExist);
+			
+			let _usize_proposal_index = TryInto::<usize>::try_into(proposal_index).ok().unwrap();
+			let proposal = &mut ProposalQueue::<T>::get()[_usize_proposal_index];
+			ensure!(who == proposal.applicant, Error::<T>::NotProposalApplicant);
+			ensure!(
+				Self::get_current_period() < proposal.starting_period.checked_add(AbortWindow::get()).unwrap(),
+				Error::<T>::AbortWindowNotPassed
+			);
+			ensure!(!proposal.aborted, Error::<T>::ProposalHasAborted);
+			let token_to_abort = proposal.token_tribute;
+			proposal.token_tribute = 0;
+			proposal.aborted = true;
+
+			// return all the tokens to applicant
+			let _ = T::Currency::transfer(&Self::account_id(), &proposal.applicant, Self::u128_to_balance(token_to_abort), KeepAlive);			
+
+			Self::deposit_event(RawEvent::Abort(proposal_index, who.clone()));
+			Ok(())
+		}
+
+		/// Member rage quit
+		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
+		pub fn update_delegate(origin, delegate_key: T::AccountId) -> dispatch::DispatchResult {
+			let who = ensure_signed(origin)?;
+			// skip checks if member is setting the delegate key to their member address
+			if who != delegate_key {
+				ensure!(!Members::<T>::contains_key(delegate_key.clone()), Error::<T>::NoOverwriteMember);
+				let delegate = AddressOfDelegates::<T>::get(delegate_key.clone());
+				ensure!(!Members::<T>::contains_key(delegate.clone()), Error::<T>::NoOverwriteDelegate);
+			}
+
+			let member = &mut Members::<T>::get(who.clone());
+			AddressOfDelegates::<T>::remove(member.delegate_key.clone());
+			AddressOfDelegates::<T>::insert(delegate_key.clone(), who.clone());
+			member.delegate_key = delegate_key.clone();
+			Self::deposit_event(RawEvent::UpdateDelegateKey(who, delegate_key));
 			Ok(())
 		}
 
