@@ -118,7 +118,7 @@ impl Config for Test {
 
 pub type System = frame_system::Module<Test>;
 pub type Balances = pallet_balances::Module<Test>;
-pub type QuadraticFunding = Module<Test>;
+pub type MolochV1 = Module<Test>;
 
 // Build genesis storage according to the mock runtime.
 pub fn new_test_ext() -> sp_io::TestExternalities {
