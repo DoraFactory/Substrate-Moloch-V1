@@ -12,7 +12,7 @@ impl_outer_origin! {
 	pub enum Origin for Test {}
 }
 
-mod quadratic_funding {
+mod moloch_v1 {
 	pub use crate::Event;
 }
 
@@ -20,7 +20,7 @@ impl_outer_event! {
 	pub enum Event for Test {
 		system<T>,
 		pallet_balances<T>,
-		quadratic_funding<T>,
+		moloch_v1<T>,
 	}
 }
 
@@ -35,15 +35,15 @@ parameter_types! {
 }
 
 parameter_types! {
-	// for testing, set unit to pico
-    pub const VoteUnit: u128 = 1;
-	// The base of unit per vote, should be 100 pico of token for each vote
-    pub const NumberOfUnit: u128 = 100;
-    // The ratio of fee for each trans, final value should be FeeRatio/NumberOfUnit
-    pub const FeeRatio: u128 = 5;
-	pub const QuadraticFundingModuleId: ModuleId = ModuleId(*b"py/quafd");
-	pub const NameMinLength: usize = 3;
-	pub const NameMaxLength: usize = 32;
+	// for testing, set max to 10**8
+    pub const MolochV1ModuleId: ModuleId = ModuleId(*b"py/moloc");
+	// HARD-CODED LIMITS
+    // These numbers are quite arbitrary; they are small enough to avoid overflows when doing calculations
+    // with periods or shares, yet big enough to not limit reasonable use cases.
+    pub const MaxVotingPeriodLength: u128 = 100_000_000; // maximum length of voting period
+    pub const MaxGracePeriodLength: u128 = 100_000_000; // maximum length of grace period
+    pub const MaxDilutionBound: u128 = 100_000_000; // maximum dilution bound
+    pub const MaxShares: u128 = 100_000_000; // maximum number of shares that can be minted
 }
 
 impl system::Trait for Test {
@@ -87,38 +87,44 @@ impl pallet_balances::Trait for Test {
 	type WeightInfo = ();
 }
 
+impl pallet_timestamp::Trait for Test {
+    type Moment = u64;
+    type OnTimestampSet = ();
+    type MinimumPeriod = ();
+    type WeightInfo = ();
+}
+
 impl Config for Test {
-	type ModuleId = QuadraticFundingModuleId;
+	type ModuleId = MolochV1ModuleId;
     // The Balances pallet implements the ReservableCurrency trait.
     // https://substrate.dev/rustdocs/v2.0.0/pallet_balances/index.html#implementations-2
     type Currency = pallet_balances::Module<Test>;
 
-    // Use the UnitOfVote from the parameter_types block.
-    type UnitOfVote = VoteUnit;
-
     // No action is taken when deposits are forfeited.
     type Slashed = ();
-
-    // Use the MinNickLength from the parameter_types block.
-    type NumberOfUnitPerVote = NumberOfUnit;
-
-    // Use the FeeRatio from the parameter_types block.
-    type FeeRatioPerVote = FeeRatio;
 
 	type Event = Event;
 
 	type AdminOrigin = frame_system::EnsureRoot<u64>;
 
-	// The minimum length of project name
-	type NameMinLength = NameMinLength;
+	// maximum length of voting period
+	type MaxVotingPeriodLength = MaxVotingPeriodLength;
 
-	// The maximum length of project name
-	type NameMaxLength = NameMaxLength;
+	// maximum length of grace period
+	type MaxGracePeriodLength = MaxGracePeriodLength;
+
+	// maximum dilution bound
+	type MaxDilutionBound = MaxDilutionBound;
+
+	// maximum number of shares
+	type MaxShares = MaxShares;
+
 }
 
 pub type System = frame_system::Module<Test>;
 pub type Balances = pallet_balances::Module<Test>;
 pub type MolochV1 = Module<Test>;
+pub type Timestamp = pallet_timestamp::Module<Test>;
 
 // Build genesis storage according to the mock runtime.
 pub fn new_test_ext() -> sp_io::TestExternalities {

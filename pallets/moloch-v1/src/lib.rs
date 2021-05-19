@@ -300,7 +300,8 @@ decl_module! {
 			
 			let proposal_len = ProposalQueue::<T>::get().len();
 			ensure!(proposal_index < proposal_len.try_into().unwrap(), Error::<T>::ProposalNotExist);
-			let proposal = &mut ProposalQueue::<T>::get()[TryInto::<usize>::try_into(proposal_index).ok().unwrap()];
+			let _usize_proposal_index = TryInto::<usize>::try_into(proposal_index).ok().unwrap();
+			let proposal = &mut ProposalQueue::<T>::get()[_usize_proposal_index];
 			ensure!(vote_unit < 3 && vote_unit > 0, Error::<T>::InvalidVote);
 			ensure!(
 				Self::get_current_period() - VotingPeriodLength::get() < proposal.starting_period,
@@ -328,6 +329,10 @@ decl_module! {
 			} else if vote == Vote::No {
 				proposal.no_votes = proposal.no_votes.checked_add(member.shares).unwrap();
 			}
+			// need to mutate for update
+			ProposalQueue::<T>::mutate(|ps| {
+				ps[_usize_proposal_index] = proposal.clone();
+			});
 			Self::deposit_event(RawEvent::SubmitVote(proposal_index, who, delegate, vote_unit));
 			Ok(())
 		}
@@ -397,6 +402,11 @@ decl_module! {
 				let _ = T::Currency::transfer(&Self::account_id(), &proposal.applicant, token_tribute, KeepAlive);
 			}
 
+			// need to mutate for update
+			ProposalQueue::<T>::mutate(|ps| {
+				ps[_usize_proposal_index] = proposal.clone();
+			});
+
 			// send reward
 			let _ = T::Currency::transfer(&Self::account_id(), &who, ProcessingReward::<T>::get(), KeepAlive);
 			// return deposit with reward slashed
@@ -459,6 +469,11 @@ decl_module! {
 			let token_to_abort = proposal.token_tribute;
 			proposal.token_tribute = 0;
 			proposal.aborted = true;
+
+			// need to mutate for update
+			ProposalQueue::<T>::mutate(|ps| {
+				ps[_usize_proposal_index] = proposal.clone();
+			});
 
 			// return all the tokens to applicant
 			let _ = T::Currency::transfer(&Self::account_id(), &proposal.applicant, Self::u128_to_balance(token_to_abort), KeepAlive);			
