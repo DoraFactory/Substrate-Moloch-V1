@@ -6,7 +6,7 @@
 /// debug guide https://substrate.dev/recipes/runtime-printing.html
 use frame_support::{
 	decl_module, decl_storage, decl_event, decl_error, dispatch, debug, ensure,
-	traits::{Currency, EnsureOrigin, ReservableCurrency, OnUnbalanced, Get, ExistenceRequirement::{KeepAlive}},
+	traits::{Currency, EnsureOrigin, ReservableCurrency, OnUnbalanced, Get, BalanceStatus, ExistenceRequirement::{KeepAlive}},
 };
 use sp_runtime::{ModuleId, traits::{ AccountIdConversion }};
 use frame_support::codec::{Encode, Decode};
@@ -145,7 +145,8 @@ decl_storage! {
 // Pallets use events to inform users when important changes are made.
 // https://substrate.dev/docs/en/knowledgebase/runtime/events
 decl_event!(
-	pub enum Event<T> where AccountId = <T as frame_system::Trait>::AccountId {
+	pub enum Event<T> where AccountId = <T as frame_system::Trait>::AccountId, 
+	        Balance = <<T as Config>::Currency as Currency<<T as frame_system::Trait>::AccountId>>::Balance {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [proposalIndex, delegateKey, memberAddress, applicant, tokenTribute, sharesRequested] 
 		SubmitProposal(u128, AccountId, AccountId, AccountId, u128, u128),
@@ -161,6 +162,10 @@ decl_event!(
 		UpdateDelegateKey(AccountId, AccountId),
 		/// parameters. [summoner, shares]
 		SummonComplete(AccountId, u128),
+		/// parameters. [totalShares, dilutionBond, maxTotalSharesVoteAtYes]
+		DilutionBoundExeceeds(u128, u128, u128),
+		/// parameters. [currentReserved, requiredReserved]
+		ReserveBalanceOutage(Balance, Balance),
 	}
 );
 
@@ -182,6 +187,7 @@ decl_error! {
 		SharesOverFlow,
 		ProposalNotExist,
 		ProposalNotStart,
+		ProposalNotReady,
 		ProposalHasProcessed,
 		ProposalHasAborted,
 		ProposalNotProcessed,
@@ -189,9 +195,10 @@ decl_error! {
 		ProposalExpired,
 		InvalidVote,
 		MemberHasVoted,
-		AbortWindowNotPassed,
+		AbortWindowHasPassed,
 		NoOverwriteDelegate,
 		NoOverwriteMember,
+		BalanceReserveFailed,
 	}
 }
 
@@ -256,12 +263,19 @@ decl_module! {
 			let total_requested = TotalSharesRequested::get().checked_add(shares_requested).unwrap();
 			let future_shares = TotalShares::get().checked_add(total_requested).unwrap();
 			ensure!(future_shares <= T::MaxShares::get(), Error::<T>::SharesOverFlow);
+			// reserve tribute from applicant and store it in the Moloch until the proposal is processed
+			let res =  T::Currency::reserve(&applicant, token_tribute);
+			match res {
+				Err(_e) => {
+					Err(Error::<T>::BalanceReserveFailed)?
+				},
+				Ok(_v) => {},
+			}
 			// update total shares requested
 			TotalSharesRequested::put(total_requested);
 			// collect proposal deposit from proposer and store it in the Moloch until the proposal is processed
 			let _ = T::Currency::transfer(&who, &Self::account_id(), ProposalDeposit::<T>::get(), KeepAlive);
-			// collect tribute from applicant and store it in the Moloch until the proposal is processed
-			let _ = T::Currency::transfer(&applicant, &Self::account_id(), token_tribute, KeepAlive);
+
 			let proposal_queue = ProposalQueue::<T>::get();
 			let proposal_period = match proposal_queue.len() {
 				0 => 0,
@@ -303,10 +317,11 @@ decl_module! {
 			let _usize_proposal_index = TryInto::<usize>::try_into(proposal_index).ok().unwrap();
 			let proposal = &mut ProposalQueue::<T>::get()[_usize_proposal_index];
 			ensure!(vote_unit < 3 && vote_unit > 0, Error::<T>::InvalidVote);
-			ensure!(
-				Self::get_current_period() - VotingPeriodLength::get() < proposal.starting_period,
-				Error::<T>::ProposalExpired
-			);
+			ensure!(Self::get_current_period() >= proposal.starting_period, Error::<T>::ProposalNotStart);
+			// ensure!(
+			// 	Self::get_current_period() - VotingPeriodLength::get() < proposal.starting_period,
+			// 	Error::<T>::ProposalExpired
+			// );
 			ensure!(!ProposalVotes::<T>::contains_key(proposal_index, delegate.clone()), Error::<T>::MemberHasVoted);
 			ensure!(!proposal.aborted, Error::<T>::ProposalHasAborted);
 			let vote = match vote_unit {
@@ -347,7 +362,7 @@ decl_module! {
 			let proposal = &mut ProposalQueue::<T>::get()[_usize_proposal_index];
 			ensure!(
 				Self::get_current_period() - VotingPeriodLength::get() - GracePeriodLength::get() >= proposal.starting_period,
-				Error::<T>::ProposalNotStart
+				Error::<T>::ProposalNotReady
 			);
 			ensure!(proposal.processed == false, Error::<T>::ProposalHasProcessed);
 			ensure!(proposal_index == 0 || ProposalQueue::<T>::get()[_usize_proposal_index-1].processed, Error::<T>::PreviousProposalNotProcessed);
@@ -358,7 +373,15 @@ decl_module! {
 			let mut did_pass = proposal.yes_votes > proposal.no_votes;
 			let token_tribute = Self::u128_to_balance(proposal.token_tribute);
 
+			// as anyone can process the proposal and get rewarded, so do not fail here
 			if TotalShares::get().checked_mul(DilutionBound::get()).unwrap() < proposal.max_total_shares_at_yes {
+				Self::deposit_event(RawEvent::DilutionBoundExeceeds(TotalShares::get(), DilutionBound::get(), proposal.max_total_shares_at_yes));
+				did_pass = false;
+			}
+
+			let reserved = T::Currency::reserved_balance(&proposal.applicant);
+			if reserved < token_tribute {
+				Self::deposit_event(RawEvent::ReserveBalanceOutage(reserved, token_tribute));
 				did_pass = false;
 			}
 
@@ -387,19 +410,19 @@ decl_module! {
 						exists: true,
 						delegate_key: proposal.applicant.clone(),
 					};
-					Members::<T>::insert(who.clone(), member);
-					AddressOfDelegates::<T>::insert(who.clone(), who.clone());
+					Members::<T>::insert(proposal.applicant.clone(), member);
+					AddressOfDelegates::<T>::insert(proposal.applicant.clone(), proposal.applicant.clone());
 				}
 
 				// mint new shares
 				let totoal_shares = TotalShares::get().checked_add(proposal.shares_requested).unwrap();
 				TotalShares::put(totoal_shares);
-				// transfer tokens to guild bank
-				let _ = T::Currency::transfer(&proposal.applicant, &Self::account_id(), token_tribute, KeepAlive);
+				// repatriate the reserved balance to guild bank's free balance
+				let _ = T::Currency::repatriate_reserved(&proposal.applicant,  &Self::account_id(), token_tribute, BalanceStatus::Free);
 			} else {
 				// Proposal failed
-				// return all the tokens to applicant
-				let _ = T::Currency::transfer(&Self::account_id(), &proposal.applicant, token_tribute, KeepAlive);
+				// unreserve the balance of applicant
+				let _ = T::Currency::unreserve(&proposal.applicant, token_tribute);
 			}
 
 			// need to mutate for update
@@ -411,7 +434,7 @@ decl_module! {
 			let _ = T::Currency::transfer(&Self::account_id(), &who, ProcessingReward::<T>::get(), KeepAlive);
 			// return deposit with reward slashed
 			let rest_balance = ProposalDeposit::<T>::get() - ProcessingReward::<T>::get();
-			let _ = T::Currency::transfer(&Self::account_id(), &who, rest_balance, KeepAlive);			
+			let _ = T::Currency::transfer(&Self::account_id(), &proposal.proposer, rest_balance, KeepAlive);			
 
 			Self::deposit_event(RawEvent::ProcessProposal(
 				proposal_index, 
@@ -438,7 +461,9 @@ decl_module! {
 			ensure!(ProposalQueue::<T>::get()[_usize_proposal_index].processed, Error::<T>::ProposalNotProcessed);
 
 			// burn shares
-			member.shares = member.shares.checked_sub(shares_to_burn).unwrap();
+			Members::<T>::mutate(who.clone(), |mem| {
+				mem.shares = member.shares.checked_sub(shares_to_burn).unwrap();
+			});
 			let initial_total = TotalShares::get();
 			let totoal_shares = initial_total.checked_sub(shares_to_burn).unwrap();
 			TotalShares::put(totoal_shares);
@@ -463,7 +488,7 @@ decl_module! {
 			ensure!(who == proposal.applicant, Error::<T>::NotProposalApplicant);
 			ensure!(
 				Self::get_current_period() < proposal.starting_period.checked_add(AbortWindow::get()).unwrap(),
-				Error::<T>::AbortWindowNotPassed
+				Error::<T>::AbortWindowHasPassed
 			);
 			ensure!(!proposal.aborted, Error::<T>::ProposalHasAborted);
 			let token_to_abort = proposal.token_tribute;
@@ -475,8 +500,8 @@ decl_module! {
 				ps[_usize_proposal_index] = proposal.clone();
 			});
 
-			// return all the tokens to applicant
-			let _ = T::Currency::transfer(&Self::account_id(), &proposal.applicant, Self::u128_to_balance(token_to_abort), KeepAlive);			
+			// unreserve all the tokens of applicant
+			let _ = T::Currency::unreserve(&proposal.applicant, Self::u128_to_balance(token_to_abort));
 
 			Self::deposit_event(RawEvent::Abort(proposal_index, who.clone()));
 			Ok(())
@@ -500,7 +525,6 @@ decl_module! {
 			Self::deposit_event(RawEvent::UpdateDelegateKey(who, delegate_key));
 			Ok(())
 		}
-
 	}
 }
 
@@ -527,7 +551,8 @@ impl<T: Config> Module<T> {
 		let now = TryInto::<u128>::try_into(pallet_timestamp::Module::<T>::now()).ok().unwrap();
 		let summon_time = TryInto::<u128>::try_into(SummonTime::<T>::get()).ok().unwrap();
 		let diff = now.checked_sub(summon_time).unwrap();
-		diff.checked_div(PeriodDuration::get().into()).unwrap()
+		// the timestamp is in milli seconds
+		diff.checked_div(1000).unwrap().checked_div(PeriodDuration::get().into()).unwrap()
 	}
 
 }
