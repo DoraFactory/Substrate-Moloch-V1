@@ -1,16 +1,10 @@
 use crate::{Error, mock::*};
 use frame_support::{assert_ok, assert_noop};
-use sp_core::H256;
-use sp_runtime::traits::BadOrigin;
 use super::RawEvent;
+use sp_std::convert::{TryInto};
 
-/// generate a Hash for indexing project
-fn get_hash(value: u128) -> H256 {
-	let slices = value.to_be_bytes();
-	H256::from_slice(&slices.repeat(2))
-}
 
-fn last_event() -> RawEvent<u64> {
+fn last_event() -> RawEvent<u64, u64> {
 	System::events().into_iter().map(|r| r.event)
 		.filter_map(|e| {
 			if let Event::moloch_v1(inner) = e { Some(inner) } else { None }
@@ -19,116 +13,108 @@ fn last_event() -> RawEvent<u64> {
 		.unwrap()
 }
 
+/// A helper function to summon moloch for each test case
+fn summon_with(initial_member: u64) {
+	// in seconds
+	let period_duration = 10;
+	let voting_period_length = 2;
+	let grace_period_length = 2;
+	let abort_window = 1;
+	let dilution_bound = 1;
+	let proposal_deposit = 100;
+	let processing_reward = 50;
+
+	let _ = MolochV1::summon(Origin::signed(initial_member), period_duration, voting_period_length, grace_period_length, abort_window, dilution_bound, proposal_deposit, processing_reward);
+}
+
 #[test]
-fn round_control_works() {
+fn summon_works() {
 	new_test_ext().execute_with(|| {
-		let round_id = 1;
-		// make sure only AdminOrigin can start/end round
-		assert_ok!(MolochV1::summon(Origin::signed(1), 35, 35, 20, 20,15, 100, 10));
+		// in seconds
+		let period_duration = 10;
+		let voting_period_length = 2;
+		let grace_period_length = 2;
+		let abort_window = 1;
+		let dilution_bound = 1;
+		let proposal_deposit = 100;
+		let processing_reward = 50;
+
+		assert_ok!(MolochV1::summon(Origin::signed(1), period_duration, voting_period_length, grace_period_length, abort_window, dilution_bound, proposal_deposit, processing_reward));
+		// check the constants
+		assert_eq!(MolochV1::period_duration(), period_duration);
+		assert_eq!(MolochV1::voting_period_length(), voting_period_length);
+		assert_eq!(MolochV1::grace_period_length(), grace_period_length);
+		assert_eq!(MolochV1::abort_window(), abort_window);
+		assert_eq!(MolochV1::dilution_bound(), dilution_bound);
+		assert_eq!(MolochV1::proposal_deposit(), proposal_deposit);
+		assert_eq!(MolochV1::processing_reward(), processing_reward);
+
+		// check the shares and member
+		assert_eq!(MolochV1::totoal_shares(), 1);
+		assert_eq!(MolochV1::members(1).exists, true);
 	});
 }
 
-// #[test]
-// fn register_project_works() {
-// 	new_test_ext().execute_with(|| {
-// 		// IMPORTANT, event won't emit in block 0
-// 		System::set_block_number(1);
-// 		let hash = get_hash(1);
-// 		let project_name = b"name".to_vec();
-// 		let round_id = 1;
-// 		// Dispatch a signed extrinsic.
-// 		// should start round first
-// 		assert_ok!(QuadraticFunding::start_round(Origin::root(), round_id));
-// 		assert_ok!(QuadraticFunding::register_project(Origin::signed(1), round_id, hash, project_name.clone()));
-		
-// 		// Read pallet storage and assert an expected result.
-// 		// positive case
-// 		assert_eq!(QuadraticFunding::projects(round_id, hash).name, project_name);
-// 		// negative case
-// 		assert_noop!(
-// 			QuadraticFunding::register_project(Origin::signed(1), round_id, hash, project_name),
-// 			Error::<Test>::DuplicateProject
-// 		);
+#[test]
+fn submit_proposal_works() {
+	new_test_ext().execute_with(|| {
+		// IMPORTANT, event won't emit in block 0
+		System::set_block_number(1);
+		let initial_member = 1;
+		summon_with(initial_member);
 
-// 		assert_eq!(Balances::free_balance(0), 1000);
-// 		// Deprecated! This method has been changed to rpc
-// 		// assert_ok!(QuadraticFunding::vote_cost(Origin::signed(1), round_id, hash, 1));
-// 		// assert_eq!(last_event(), RawEvent::VoteCost(hash,1));
-// 	});
-// }
+		// failed when member propose for applicant who did not deposit in custody account
+		let token_tribute = 50;
+		let shares_requested = 5;
+		let applicant = 2;
+		let detail = b"test_proposal".to_vec();
+		assert_noop!(
+			MolochV1::submit_proposal(Origin::signed(1), applicant, token_tribute, shares_requested, detail.clone()),
+			Error::<Test>::NoCustodyFound
+		);
 
-// #[test]
-// fn donate_works() {
-// 	new_test_ext().execute_with(|| {
-// 		let round_id = 1;
-// 		// Dispatch a signed extrinsic.
-// 		// should start round first
-// 		assert_ok!(QuadraticFunding::start_round(Origin::root(), round_id));
-// 		assert_ok!(QuadraticFunding::donate(Origin::signed(0), round_id, 500));
-// 		// make sure the source and dest balance is right
-// 		assert_eq!(Balances::free_balance(0), 500);
-// 		assert_eq!(Balances::free_balance(&QuadraticFunding::account_id()), 500);		
-// 		// check the support pool
-// 		assert_eq!(QuadraticFunding::rounds(round_id).pre_tax_support_pool, 500);
-// 		// fee rate is 5%
-// 		assert_eq!(QuadraticFunding::rounds(round_id).total_tax, 25);
-// 		assert_eq!(QuadraticFunding::rounds(round_id).support_pool, 475);
-// 	});
-// }
+		// deposit custody and resubmit
+		assert_ok!(MolochV1::custody(Origin::signed(applicant), token_tribute));
+		assert_ok!(MolochV1::submit_proposal(Origin::signed(1), applicant, token_tribute, shares_requested, detail));
+		assert_eq!(last_event(), RawEvent::SubmitProposal(0, 1, 1, applicant, token_tribute.into(), shares_requested));
+	});
+}
 
-// #[test]
-// fn vote_without_fund_works() {
-// 	new_test_ext().execute_with(|| {
-// 		let round_id = 1;
-// 		assert_ok!(QuadraticFunding::start_round(Origin::root(), round_id));
+#[test]
+fn add_member_works() {
+	new_test_ext().execute_with(|| {
+		// IMPORTANT, event won't emit in block 0
+		System::set_block_number(1);
+		let initial_member = 1;
+		summon_with(initial_member);
 
-// 		// initalize 3 projects
-// 		for i in 1..4 {
-// 			System::set_block_number(i);
-// 			let hash = get_hash(i.into());
-// 			let project_name = b"name".to_vec();
-// 			assert_ok!(QuadraticFunding::register_project(Origin::signed(i), round_id, hash, project_name.clone()));
-// 			assert_eq!(QuadraticFunding::projects(round_id, hash).name, project_name);
+		// failed when member propose for applicant who did not deposit in custody account
+		let token_tribute = 50;
+		let shares_requested = 5;
+		let applicant = 2;
+		let detail = b"test_proposal".to_vec();
+		// deposit custody and submit
+		assert_ok!(MolochV1::custody(Origin::signed(applicant), token_tribute));
+		assert_ok!(MolochV1::submit_proposal(Origin::signed(1), applicant, token_tribute, shares_requested, detail));
 
-// 			// vote for each own's project only once, in this case there will be no fund
-// 			let vote = 3;
-// 			let expected_cost:u64 = vote * (vote + 1) / 2 * 100;
-// 			assert_ok!(QuadraticFunding::vote(Origin::signed(i), round_id, hash, vote.into()));
-// 			// We initialize the balance sequentially, each one got 1000*(i+1) pico
-// 			assert_eq!(Balances::free_balance(i), 1000*(i+1) - expected_cost);
-// 		}
-// 		assert_ok!(QuadraticFunding::end_round(Origin::root(), round_id));
-// 		// no support area means no fund expense
-// 		assert_eq!(QuadraticFunding::rounds(round_id).total_support_area, 0);
-// 	});
-// }
+		// set the timestamp to make voting period effect
+		let now = Timestamp::now();
+		let period_duration = TryInto::<u64>::try_into(MolochV1::period_duration() * 1000 * 2).ok().unwrap();
+		Timestamp::set_timestamp(now + period_duration);
 
+		// vote yes
+		assert_ok!(MolochV1::submit_vote(Origin::signed(1), 0, 1));
+		 
+		// pass grace period
+		Timestamp::set_timestamp(now + period_duration * 4);
+		let processor = 3;
+		let balance_before = Balances::free_balance(processor);
+		let processing_reward = MolochV1::processing_reward();
+		assert_ok!(MolochV1::process_proposal(Origin::signed(processor), 0));
+		// make sure the processor get rewarded
+		assert_eq!(Balances::free_balance(processor), processing_reward + balance_before);
 
-// #[test]
-// fn vote_with_fund_works() {
-// 	new_test_ext().execute_with(|| {
-// 		let round_id = 1;
-// 		assert_ok!(QuadraticFunding::start_round(Origin::root(), round_id));
-// 		// sponsor default round
-// 		assert_ok!(QuadraticFunding::donate(Origin::signed(0), round_id, 500));
-// 		// initalize 3 projects
-// 		for i in 1..4 {
-// 			System::set_block_number(i);
-// 			let hash = get_hash(i.into());
-// 			let project_name = b"name".to_vec();
-// 			assert_ok!(QuadraticFunding::register_project(Origin::signed(i), round_id, hash, project_name.clone()));
-// 			assert_eq!(QuadraticFunding::projects(round_id, hash).name, project_name);
-
-// 			// vote to each other, the area should be 3,3,12
-// 			for j in 1..4 {
-// 				let vote = if i > 2 {2} else {1};
-// 				assert_ok!(QuadraticFunding::vote(Origin::signed(j), round_id, hash, vote));
-// 			}
-// 		}
-// 		assert_eq!(QuadraticFunding::projects(round_id, get_hash(1)).support_area, 3);
-// 		assert_eq!(QuadraticFunding::projects(round_id, get_hash(3)).support_area, 12);
-// 		// total area is 18
-// 		assert_eq!(QuadraticFunding::rounds(round_id).total_support_area, 18);
-		
-// 	});
-// }
+		// check the applicant has become a member
+		assert_eq!(MolochV1::members(applicant).exists, true);
+	});
+}

@@ -116,26 +116,31 @@ decl_storage! {
 		// Learn more about declaring storage items:
 		// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
 		// Map, each round start with an id => bool 
-		TotalShares: u128;
-		TotalSharesRequested: u128;
-		PeriodDuration: u32;
-        VotingPeriodLength: u128;
-        GracePeriodLength: u128;
-        AbortWindow: u128;
-        ProposalDeposit: BalanceOf<T>;
-        DilutionBound: u128;
-        ProcessingReward: BalanceOf<T>;
+		TotalShares get(fn totoal_shares): u128;
+		TotalSharesRequested get(fn totoal_shares_requested): u128;
+		PeriodDuration get(fn period_duration): u32;
+        VotingPeriodLength get(fn voting_period_length): u128;
+        GracePeriodLength get(fn grace_period_length): u128;
+        AbortWindow get(fn abort_window): u128;
+        ProposalDeposit get(fn proposal_deposit): BalanceOf<T>;
+        DilutionBound get(fn dilution_bound): u128;
+        ProcessingReward get(fn processing_reward): BalanceOf<T>;
 		SummonTime get(fn summon_time): T::Moment;
 		Members get(fn members): map hasher(blake2_128_concat) T::AccountId  => MemberOf<T>;
 		AddressOfDelegates get(fn address_of_delegate): map hasher(blake2_128_concat) T::AccountId  => T::AccountId;
 		ProposalQueue get(fn proposal_queue): Vec<ProposalOf<T>>;
 		ProposalVotes get(fn proposal_vote): double_map hasher(blake2_128_concat) u128, hasher(blake2_128_concat) T::AccountId => u8;
+		ApplicantCustody get(fn applicant_custody):  map hasher(blake2_128_concat) T::AccountId  => BalanceOf<T>;
 	}
 	add_extra_genesis {
 		build(|_config| {
 			// Create pallet's internal account
 			let _ = T::Currency::make_free_balance_be(
 				&<Module<T>>::account_id(),
+				T::Currency::minimum_balance(),
+			);
+			let _ = T::Currency::make_free_balance_be(
+				&<Module<T>>::custody_account(),
 				T::Currency::minimum_balance(),
 			);
 		});
@@ -165,7 +170,7 @@ decl_event!(
 		/// parameters. [totalShares, dilutionBond, maxTotalSharesVoteAtYes]
 		DilutionBoundExeceeds(u128, u128, u128),
 		/// parameters. [currentReserved, requiredReserved]
-		ReserveBalanceOutage(Balance, Balance),
+		CustodyBalanceOutage(Balance, Balance),
 	}
 );
 
@@ -198,7 +203,7 @@ decl_error! {
 		AbortWindowHasPassed,
 		NoOverwriteDelegate,
 		NoOverwriteMember,
-		BalanceReserveFailed,
+		NoCustodyFound,
 	}
 }
 
@@ -252,6 +257,16 @@ decl_module! {
 			Ok(())
 		}
 
+		/// Applicant transfer tribute to custody account in advance
+		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
+		pub fn custody(origin, #[compact] token_tribute: BalanceOf<T>)  -> dispatch::DispatchResult {
+			let who = ensure_signed(origin)?;
+			let _ =  T::Currency::transfer(&who, &Self::custody_account(), token_tribute, KeepAlive);
+			ApplicantCustody::<T>::insert(who.clone(), token_tribute);
+			Ok(())
+		}
+
+
 		/// One of the members submit a proposal
 		#[weight = 10_000 + T::DbWeight::get().reads_writes(1,1)]
 		pub fn submit_proposal(origin, applicant: T::AccountId, #[compact] token_tribute: BalanceOf<T>,
@@ -263,14 +278,14 @@ decl_module! {
 			let total_requested = TotalSharesRequested::get().checked_add(shares_requested).unwrap();
 			let future_shares = TotalShares::get().checked_add(total_requested).unwrap();
 			ensure!(future_shares <= T::MaxShares::get(), Error::<T>::SharesOverFlow);
-			// reserve tribute from applicant and store it in the Moloch until the proposal is processed
-			let res =  T::Currency::reserve(&applicant, token_tribute);
-			match res {
-				Err(_e) => {
-					Err(Error::<T>::BalanceReserveFailed)?
-				},
-				Ok(_v) => {},
-			}
+			// check custody record and balance
+			let custody_balance = T::Currency::free_balance(&Self::custody_account());
+			ensure!(
+				ApplicantCustody::<T>::contains_key(applicant.clone()) &&
+				custody_balance >= token_tribute,
+				Error::<T>::NoCustodyFound
+			);
+
 			// update total shares requested
 			TotalSharesRequested::put(total_requested);
 			// collect proposal deposit from proposer and store it in the Moloch until the proposal is processed
@@ -318,10 +333,10 @@ decl_module! {
 			let proposal = &mut ProposalQueue::<T>::get()[_usize_proposal_index];
 			ensure!(vote_unit < 3 && vote_unit > 0, Error::<T>::InvalidVote);
 			ensure!(Self::get_current_period() >= proposal.starting_period, Error::<T>::ProposalNotStart);
-			// ensure!(
-			// 	Self::get_current_period() - VotingPeriodLength::get() < proposal.starting_period,
-			// 	Error::<T>::ProposalExpired
-			// );
+			ensure!(
+				Self::get_current_period() - VotingPeriodLength::get() < proposal.starting_period,
+				Error::<T>::ProposalExpired
+			);
 			ensure!(!ProposalVotes::<T>::contains_key(proposal_index, delegate.clone()), Error::<T>::MemberHasVoted);
 			ensure!(!proposal.aborted, Error::<T>::ProposalHasAborted);
 			let vote = match vote_unit {
@@ -379,9 +394,10 @@ decl_module! {
 				did_pass = false;
 			}
 
-			let reserved = T::Currency::reserved_balance(&proposal.applicant);
-			if reserved < token_tribute {
-				Self::deposit_event(RawEvent::ReserveBalanceOutage(reserved, token_tribute));
+			// check custody record and balance
+			let custody_balance = T::Currency::free_balance(&Self::custody_account());
+			if !ApplicantCustody::<T>::contains_key(&proposal.applicant) || custody_balance < token_tribute {
+				Self::deposit_event(RawEvent::CustodyBalanceOutage(custody_balance, token_tribute));
 				did_pass = false;
 			}
 
@@ -417,12 +433,16 @@ decl_module! {
 				// mint new shares
 				let totoal_shares = TotalShares::get().checked_add(proposal.shares_requested).unwrap();
 				TotalShares::put(totoal_shares);
-				// repatriate the reserved balance to guild bank's free balance
-				let _ = T::Currency::repatriate_reserved(&proposal.applicant,  &Self::account_id(), token_tribute, BalanceStatus::Free);
+				// transfer correponding balance from custody account to guild bank's free balance
+				let _ = T::Currency::transfer(&Self::custody_account(),  &Self::account_id(), token_tribute, KeepAlive);
+				let custody_balance = ApplicantCustody::<T>::get(proposal.applicant.clone());
+				ApplicantCustody::<T>::insert(proposal.applicant.clone(), custody_balance - token_tribute);
 			} else {
 				// Proposal failed
-				// unreserve the balance of applicant
-				let _ = T::Currency::unreserve(&proposal.applicant, token_tribute);
+				// return the balance of applicant
+				let _ = T::Currency::transfer(&Self::custody_account(),  &proposal.applicant, token_tribute, KeepAlive);
+				let custody_balance = ApplicantCustody::<T>::get(proposal.applicant.clone());
+				ApplicantCustody::<T>::insert(proposal.applicant.clone(), custody_balance - token_tribute);
 			}
 
 			// need to mutate for update
@@ -500,8 +520,9 @@ decl_module! {
 				ps[_usize_proposal_index] = proposal.clone();
 			});
 
-			// unreserve all the tokens of applicant
-			let _ = T::Currency::unreserve(&proposal.applicant, Self::u128_to_balance(token_to_abort));
+			// return the token to applicant and delete record
+			let _ = T::Currency::transfer(&Self::custody_account(),  &proposal.applicant, Self::u128_to_balance(token_to_abort), KeepAlive);
+			ApplicantCustody::<T>::remove(&proposal.applicant);
 
 			Self::deposit_event(RawEvent::Abort(proposal_index, who.clone()));
 			Ok(())
@@ -537,6 +558,10 @@ impl<T: Config> Module<T> {
 	/// value and only call this once.
 	pub fn account_id() -> T::AccountId {
 		T::ModuleId::get().into_account()
+	}
+
+	pub fn custody_account() -> T::AccountId {
+		T::ModuleId::get().into_sub_account("custody")
 	}
 
 	pub fn u128_to_balance(cost: u128) -> BalanceOf<T> {
