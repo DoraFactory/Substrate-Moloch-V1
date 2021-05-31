@@ -6,7 +6,7 @@
 /// debug guide https://substrate.dev/recipes/runtime-printing.html
 use frame_support::{
 	decl_module, decl_storage, decl_event, decl_error, dispatch, debug, ensure,
-	traits::{Currency, EnsureOrigin, ReservableCurrency, OnUnbalanced, Get, BalanceStatus, ExistenceRequirement::{KeepAlive}},
+	traits::{Currency, EnsureOrigin, ReservableCurrency, OnUnbalanced, Get, BalanceStatus, ExistenceRequirement::{KeepAlive, AllowDeath}},
 };
 use sp_runtime::{ModuleId, traits::{ AccountIdConversion }};
 use frame_support::codec::{Encode, Decode};
@@ -171,6 +171,7 @@ decl_event!(
 		DilutionBoundExeceeds(u128, u128, u128),
 		/// parameters. [currentReserved, requiredReserved]
 		CustodyBalanceOutage(Balance, Balance),
+		CustodySucceeded(AccountId, Balance),
 	}
 );
 
@@ -263,6 +264,7 @@ decl_module! {
 			let who = ensure_signed(origin)?;
 			let _ =  T::Currency::transfer(&who, &Self::custody_account(), token_tribute, KeepAlive);
 			ApplicantCustody::<T>::insert(who.clone(), token_tribute);
+			Self::deposit_event(RawEvent::CustodySucceeded(who.clone(), token_tribute));
 			Ok(())
 		}
 
@@ -334,7 +336,7 @@ decl_module! {
 			ensure!(vote_unit < 3 && vote_unit > 0, Error::<T>::InvalidVote);
 			ensure!(Self::get_current_period() >= proposal.starting_period, Error::<T>::ProposalNotStart);
 			ensure!(
-				Self::get_current_period() - VotingPeriodLength::get() < proposal.starting_period,
+				Self::get_current_period() <  VotingPeriodLength::get() + proposal.starting_period,
 				Error::<T>::ProposalExpired
 			);
 			ensure!(!ProposalVotes::<T>::contains_key(proposal_index, delegate.clone()), Error::<T>::MemberHasVoted);
@@ -434,13 +436,14 @@ decl_module! {
 				let totoal_shares = TotalShares::get().checked_add(proposal.shares_requested).unwrap();
 				TotalShares::put(totoal_shares);
 				// transfer correponding balance from custody account to guild bank's free balance
-				let _ = T::Currency::transfer(&Self::custody_account(),  &Self::account_id(), token_tribute, KeepAlive);
+				let res = T::Currency::transfer(&Self::custody_account(),  &Self::account_id(), token_tribute, AllowDeath);
+				debug::info!("asdsa---{:?}", res);
 				let custody_balance = ApplicantCustody::<T>::get(proposal.applicant.clone());
 				ApplicantCustody::<T>::insert(proposal.applicant.clone(), custody_balance - token_tribute);
 			} else {
 				// Proposal failed
 				// return the balance of applicant
-				let _ = T::Currency::transfer(&Self::custody_account(),  &proposal.applicant, token_tribute, KeepAlive);
+				let _ = T::Currency::transfer(&Self::custody_account(),  &proposal.applicant, token_tribute, AllowDeath);
 				let custody_balance = ApplicantCustody::<T>::get(proposal.applicant.clone());
 				ApplicantCustody::<T>::insert(proposal.applicant.clone(), custody_balance - token_tribute);
 			}
@@ -521,7 +524,7 @@ decl_module! {
 			});
 
 			// return the token to applicant and delete record
-			let _ = T::Currency::transfer(&Self::custody_account(),  &proposal.applicant, Self::u128_to_balance(token_to_abort), KeepAlive);
+			let _ = T::Currency::transfer(&Self::custody_account(),  &proposal.applicant, Self::u128_to_balance(token_to_abort), AllowDeath);
 			ApplicantCustody::<T>::remove(&proposal.applicant);
 
 			Self::deposit_event(RawEvent::Abort(proposal_index, who.clone()));
