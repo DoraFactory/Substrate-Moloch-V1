@@ -48,13 +48,13 @@ After processing, Bob will become a member and Bob_Stash's balance increased 500
 ![alt bob](images/bob.png)
 ![alt member](images/member.png)
 
-7. `abort`, the applicant can abort a proposal which is still in abort window.
+8. `abort`, the applicant can abort a proposal which is still in abort window.
 - proposal_index, the index of proposal queque
 We can use another account to custody some tokens and then ask member to propose. But this time, after submitted, we use this applicant to abort. In this way, we'll see applicant's balance remain the same, but member's deposit will NOT be returned.
 ![alt abort](images/abort.png)
 ![alt after-abort](images/after-abort.png)
 ```NOTE: Aborted proposal also need to be processed``` 
 
-8. `ragequit`, the member can rage quit. This will burn some shares and return some token to the member.
+9. `ragequit`, the member can rage quit. This will burn some shares and return some token to the member.
 - shares_to_burn, the shares need to be burnt.
 Let's use Bob the burn 5 shares, thus remaining tokens in guildbank should be `(1+(10-5))/11 * 3000=1636.3636`. 
