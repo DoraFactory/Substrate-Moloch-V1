@@ -5,8 +5,9 @@ Then run `./target/release/node-template --dev`
 ### Test
 1. Navigate to https://polkadot.js.org/apps/#/explorer, and  copy the [types.json](../pallets/moloch-v1/src/types.json) to settings->developer then save
 ![alt add-settings](images/add-settings.png)
-2. Click the lef top icon to open settings and choose the local node, just like below
+2. Click the lef top icon to open settings and choose the custom node and input `wss://moloch-v1.tophacker.com/`, just like below
 ![alt select-node](images/select-node.png)
+Or if you want to test on your local machine, ust choose local node.
 3. `summon`, this is to set up initial configuration for your moloch DAO.  
 - period_duration, timing unit in seconds, for test you can set it to 120.  
 - voting_period_length, number of periods for voting, after that you can not vote anymore.  
